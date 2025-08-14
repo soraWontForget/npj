@@ -1,16 +1,40 @@
 #!/usr/bin/env bash
-# newproj — create & initialize a new git project locally, optionally with a remote bare repo
+# npj — create & initialize a new git project locally, optionally with a remote bare repo
 # usage:
-#   newproj MyProject \
-#     --dir ~/code              # where to create the project (default: $PWD)
-#     --desc "Short description"\
-#     --gitignore c,macos       # comma list of templates
-#     --license mit             # mit|apache2|none (default: mit)
-#     --lfs                     # initialize Git LFS
-#     --remote user@porygon:/srv/nas3/projects   # base path on remote host
-#     --remote-name origin      # default: origin
-#     --no-dev-branch           # skip creating 'develop'
+#   npj <ProjectName> [options]
+#
+# examples:
+#   npj MyLib --dir ~/code --gitignore c,macos --desc "C utils"
+#   npj vpet --desc "virtual pet" --gitignore macos,python \
+#       --remote alex@porygon:/srv/nas3/projects
+#
+# options:
+#   --dir <path>            Where to create the project (default: $PWD)
+#   --desc <text>           README description
+#   --gitignore <csv>       Comma-separated templates: c,macos,python,node
+#   --license <mit|apache2|none>  (default: mit)
+#   --lfs                   Initialize Git LFS and track common binaries
+#   --remote <user@host:/abs/path>   Create/push to bare repo on remote
+#   --remote-name <name>    Remote name (default: origin)
+#   --no-dev-branch         Do not create 'develop' branch
+#   -h|--help               Show this help
+#
+# env:
+#   NPJ_REMOTE_DEFAULT      If set and --remote omitted, use this as default
+
 set -euo pipefail
+
+# ---------- helpers ----------
+die(){ echo "error: $*" >&2; exit 1; }
+lc(){ printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]'; }
+need_val(){
+  # usage: need_val <opt-name> <maybe-value>
+  local opt="$1"; local val="${2-}"
+  if [[ -z "${val-}" || "${val}" == --* ]]; then
+    die "$opt requires a value. e.g. $opt /abs/path or $opt user@host:/abs/path"
+  fi
+  printf '%s' "$val"
+}
 
 # ---------- defaults ----------
 DIR="$PWD"
@@ -22,41 +46,42 @@ REMOTE_BASE=""
 REMOTE_NAME="origin"
 MAKE_DEV_BRANCH=1
 
-die(){ echo "error: $*" >&2; exit 1; }
-
 # ---------- args ----------
-[[ ${1:-} ]] || die "project name required. Try: newproj MyProject [options]"
+[[ ${1:-} ]] || die "project name required. Try: npj MyProject [options]"
 NAME="$1"; shift
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dir) DIR="$2"; shift 2;;
-    --desc) DESC="$2"; shift 2;;
-    --gitignore) GITIGNORE_TEMPLATES="$2"; shift 2;;
-    --license) LICENSE="${2,,}"; shift 2;;
-    --lfs) USE_LFS=1; shift;;
-    --remote) REMOTE_BASE="$2"; shift 2;;
-    --remote-name) REMOTE_NAME="$2"; shift 2;;
+    --dir)         DIR="$(need_val --dir "${2-}")"; shift 2;;
+    --desc)        DESC="$(need_val --desc "${2-}")"; shift 2;;
+    --gitignore)   GITIGNORE_TEMPLATES="$(need_val --gitignore "${2-}")"; shift 2;;
+    --license)     LICENSE="$(lc "$(need_val --license "${2-}")")"; shift 2;;
+    --lfs)         USE_LFS=1; shift;;
+    --remote)      REMOTE_BASE="$(need_val --remote "${2-}")"; shift 2;;
+    --remote-name) REMOTE_NAME="$(need_val --remote-name "${2-}")"; shift 2;;
     --no-dev-branch) MAKE_DEV_BRANCH=0; shift;;
-    -h|--help)
-      sed -n '1,40p' "$0"; exit 0;;
+    -h|--help) sed -n '1,120p' "$0"; exit 0;;
     *) die "unknown option: $1";;
   esac
 done
 
-# ---------- paths ----------
-PROJECT_DIR="${DIR%/}/${NAME}"
-REMOTE_REPO_PATH=""
-if [[ -n "$REMOTE_BASE" ]]; then
-  # normalize remote path like user@host:/abs/path
-  if [[ "$REMOTE_BASE" != *:* ]]; then die "--remote must be user@host:/abs/path"; fi
-  REMOTE_REPO_PATH="${REMOTE_BASE%/}/${NAME}.git"
+# Default remote if flag omitted but env is set
+if [[ -z "$REMOTE_BASE" && -n "${NPJ_REMOTE_DEFAULT-}" ]]; then
+  REMOTE_BASE="$NPJ_REMOTE_DEFAULT"
 fi
 
-# ---------- create local structure ----------
+# ---------- paths ----------
+PROJECT_DIR="${DIR%/}/${NAME}"
+
+# ---------- safety checks ----------
+if [[ -e "$PROJECT_DIR/.git" ]]; then
+  die "target already a git repo: $PROJECT_DIR (remove .git or choose another --dir)"
+fi
+
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
 
+# ---------- init repo ----------
 git init --initial-branch=main >/dev/null
 
 # .gitattributes (sane defaults)
@@ -116,7 +141,7 @@ EOF
   apache2)
     cat > LICENSE <<'EOF'
 Apache License 2.0
-You can get the full text from https://www.apache.org/licenses/LICENSE-2.0.txt
+You can get the full text at: https://www.apache.org/licenses/LICENSE-2.0.txt
 EOF
     ;;
   none) : ;;
@@ -151,6 +176,9 @@ __pycache__/
 *.pyc
 .venv/
 .env
+.eggs/
+build/
+dist/
 E
     node)
       cat <<'E';;
@@ -159,21 +187,25 @@ node_modules/
 dist/
 npm-debug.log*
 yarn-error.log*
+.pnpm-store/
 E
     *)
       echo "# $1 (template not found — add your own)";;
   esac
 }
-IFS=',' read -r -a TEMPL <<< "${GITIGNORE_TEMPLATES,,}"
+
 : > .gitignore
-for t in "${TEMPL[@]}"; do [[ -n "$t" ]] && new_ignore "$t" >> .gitignore; done
+lowered_templates="$(lc "$GITIGNORE_TEMPLATES")"
+IFS=',' read -r -a TEMPL <<< "$lowered_templates"
+for t in "${TEMPL[@]:-}"; do
+  [[ -n "$t" ]] && new_ignore "$t" >> .gitignore
+done
 
 # Optional Git LFS
 if [[ $USE_LFS -eq 1 ]]; then
-  if command -v git-lfs >/dev/null; then
-    git lfs install --local
-    # Common patterns — tweak as needed
-    git lfs track "*.psd" "*.zip" "*.mp4" "*.wav" "*.pdf" >/dev/null || true
+  if command -v git-lfs >/dev/null 2>&1; then
+    git lfs install --local >/dev/null 2>&1 || true
+    git lfs track "*.psd" "*.zip" "*.mp4" "*.wav" "*.pdf" >/dev/null 2>&1 || true
     echo ".gitattributes" >> .gitignore
   else
     echo "warn: git-lfs not found, skipping LFS init" >&2
@@ -192,7 +224,8 @@ for f in $files; do
   if [[ -f "$f" ]]; then
     size=$(wc -c < "$f")
     if (( size > max )); then
-      echo "✖ Blocked: $f is >100MB ($(numfmt --to=iec "$size" 2>/dev/null || echo $size bytes))" >&2
+      human="$(command -v numfmt >/dev/null 2>&1 && numfmt --to=iec "$size" || echo "$size bytes")"
+      echo "✖ Blocked: $f is >100MB ($human)" >&2
       exit 1
     fi
   fi
@@ -202,25 +235,32 @@ chmod +x "$HOOKS_DIR/pre-commit"
 
 # Initial commit
 git add .
-git commit -m "chore: project scaffold for ${NAME}"
+git commit -m "chore: project scaffold for ${NAME}" >/dev/null
 
 # Optional develop branch
 if [[ $MAKE_DEV_BRANCH -eq 1 ]]; then
-  git branch develop
+  git branch develop >/dev/null
 fi
 
 # ---------- optional remote bare repo ----------
-if [[ -n "$REMOTE_REPO_PATH" ]]; then
-  echo ">> Creating remote bare repo: $REMOTE_REPO_PATH"
-  ssh "${REMOTE_BASE%%:*}" "mkdir -p '${REMOTE_REPO_PATH%/*}' && git init --bare '${REMOTE_REPO_PATH}'" >/dev/null
+if [[ -n "$REMOTE_BASE" ]]; then
+  # Validate user@host:/abs/path format
+  case "$REMOTE_BASE" in
+    *:/*) : ;; # ok
+    *) die "--remote must be in the form user@host:/absolute/path";;
+  esac
+  REMOTE_HOST="${REMOTE_BASE%%:*}"     # alex@porygon
+  REMOTE_BASE_DIR="${REMOTE_BASE#*:}"  # /srv/nas3/projects
+  REMOTE_REPO_DIR="${REMOTE_BASE_DIR%/}/${NAME}.git"
 
-  # (Optional) loosen safe.directory if your server uses shared dirs; uncomment if needed:
-  # git config --global --add safe.directory "$(ssh "${REMOTE_BASE%%:*}" "readlink -f '${REMOTE_REPO_PATH}'")"
+  echo ">> Creating remote bare repo: ${REMOTE_HOST}:${REMOTE_REPO_DIR}"
+  # Create base dir; init bare (prefer main if supported; fall back otherwise)
+  ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_BASE_DIR' && { git init --bare --initial-branch=main '$REMOTE_REPO_DIR' 2>/dev/null || git init --bare '$REMOTE_REPO_DIR'; }" >/dev/null
 
-  git remote add "$REMOTE_NAME" "$REMOTE_REPO_PATH"
-  git push -u "$REMOTE_NAME" main
+  git remote add "$REMOTE_NAME" "${REMOTE_HOST}:${REMOTE_REPO_DIR}"
+  git push -u "$REMOTE_NAME" main >/dev/null
   if [[ $MAKE_DEV_BRANCH -eq 1 ]]; then
-    git push -u "$REMOTE_NAME" develop
+    git push -u "$REMOTE_NAME" develop >/dev/null
   fi
 fi
 
