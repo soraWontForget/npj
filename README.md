@@ -1,5 +1,3 @@
-Here’s a clean `README.md` for your `npj` script:
-
 ````markdown
 # npj — New Project Bootstrapper
 
