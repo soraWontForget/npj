@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # npj — create & initialize a new git project locally, optionally with a remote bare repo
+#       and/or publish it to GitHub with gh
 # usage:
 #   npj <ProjectName> [options]
 #
@@ -7,6 +8,8 @@
 #   npj MyLib --dir ~/code --gitignore c,macos --desc "C utils"
 #   npj vpet --desc "virtual pet" --gitignore macos,python \
 #       --remote alex@porygon:/srv/nas3/projects
+#   npj notes --github private
+#   npj demo --github public --github-remote-name github
 #
 # options:
 #   --dir <path>            Where to create the project (default: $PWD)
@@ -15,7 +18,10 @@
 #   --license <mit|apache2|none>  (default: mit)
 #   --lfs                   Initialize Git LFS and track common binaries
 #   --remote <user@host:/abs/path>   Create/push to bare repo on remote
-#   --remote-name <name>    Remote name (default: origin)
+#   --remote-name <name>    Remote name for --remote (default: origin)
+#   --github <private|public>  Create a GitHub repo from this local scaffold and push to it
+#   --github-remote-name <name> Remote name for GitHub repo (default: github)
+#   --github-desc <text>    GitHub repo description (default: value from --desc)
 #   --no-dev-branch         Do not create 'develop' branch
 #   -h|--help               Show this help
 #
@@ -45,6 +51,9 @@ USE_LFS=0
 REMOTE_BASE=""
 REMOTE_NAME="origin"
 MAKE_DEV_BRANCH=1
+GITHUB_VISIBILITY=""
+GITHUB_REMOTE_NAME="github"
+GITHUB_DESC=""
 
 # ---------- args ----------
 [[ ${1:-} ]] || die "project name required. Try: npj MyProject [options]"
@@ -59,6 +68,16 @@ while [[ $# -gt 0 ]]; do
     --lfs)         USE_LFS=1; shift;;
     --remote)      REMOTE_BASE="$(need_val --remote "${2-}")"; shift 2;;
     --remote-name) REMOTE_NAME="$(need_val --remote-name "${2-}")"; shift 2;;
+    --github)
+      GITHUB_VISIBILITY="$(lc "$(need_val --github "${2-}")")"
+      case "$GITHUB_VISIBILITY" in
+        private|public) : ;;
+        *) die "--github must be either private or public" ;;
+      esac
+      shift 2
+      ;;
+    --github-remote-name) GITHUB_REMOTE_NAME="$(need_val --github-remote-name "${2-}")"; shift 2;;
+    --github-desc)   GITHUB_DESC="$(need_val --github-desc "${2-}")"; shift 2;;
     --no-dev-branch) MAKE_DEV_BRANCH=0; shift;;
     -h|--help) sed -n '1,120p' "$0"; exit 0;;
     *) die "unknown option: $1";;
@@ -70,12 +89,20 @@ if [[ -z "$REMOTE_BASE" && -n "${NPJ_REMOTE_DEFAULT-}" ]]; then
   REMOTE_BASE="$NPJ_REMOTE_DEFAULT"
 fi
 
+if [[ -z "$GITHUB_DESC" ]]; then
+  GITHUB_DESC="$DESC"
+fi
+
 # ---------- paths ----------
 PROJECT_DIR="${DIR%/}/${NAME}"
 
 # ---------- safety checks ----------
 if [[ -e "$PROJECT_DIR/.git" ]]; then
   die "target already a git repo: $PROJECT_DIR (remove .git or choose another --dir)"
+fi
+
+if [[ -n "$GITHUB_VISIBILITY" && "$GITHUB_REMOTE_NAME" == "$REMOTE_NAME" ]]; then
+  die "--github-remote-name must differ from --remote-name when using both remotes"
 fi
 
 mkdir -p "$PROJECT_DIR"
@@ -264,6 +291,30 @@ if [[ -n "$REMOTE_BASE" ]]; then
   fi
 fi
 
-echo "✅ Created project at: $PROJECT_DIR"
-git status --short --branch
+# ---------- optional GitHub repo via gh ----------
+if [[ -n "$GITHUB_VISIBILITY" ]]; then
+  command -v gh >/dev/null 2>&1 || die "gh CLI not found. Install GitHub CLI first."
+  gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
 
+  echo ">> Creating GitHub repo: ${NAME} (${GITHUB_VISIBILITY})"
+
+  gh_args=(repo create "$NAME" "--$GITHUB_VISIBILITY" --source=. --remote="$GITHUB_REMOTE_NAME")
+  if [[ -n "$GITHUB_DESC" ]]; then
+    gh_args+=(--description "$GITHUB_DESC")
+  fi
+  gh "${gh_args[@]}" >/dev/null
+
+  git push -u "$GITHUB_REMOTE_NAME" main >/dev/null
+  if [[ $MAKE_DEV_BRANCH -eq 1 ]]; then
+    git push -u "$GITHUB_REMOTE_NAME" develop >/dev/null
+  fi
+fi
+
+echo "✅ Created project at: $PROJECT_DIR"
+if [[ -n "$REMOTE_BASE" ]]; then
+  echo "   SSH remote:    $REMOTE_NAME -> ${REMOTE_HOST}:${REMOTE_REPO_DIR}"
+fi
+if [[ -n "$GITHUB_VISIBILITY" ]]; then
+  echo "   GitHub remote: $GITHUB_REMOTE_NAME -> github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo "<created>")"
+fi
+git status --short --branch
