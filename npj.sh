@@ -9,7 +9,7 @@
 #   npj vpet --desc "virtual pet" --gitignore macos,python \
 #       --remote alex@porygon:/srv/nas3/projects
 #   npj notes --github private
-#   npj demo --github public --github-remote-name github
+#   npj demo --remote alex@porygon:/srv/nas3/projects --github public
 #
 # options:
 #   --dir <path>            Where to create the project (default: $PWD)
@@ -20,7 +20,8 @@
 #   --remote <user@host:/abs/path>   Create/push to bare repo on remote
 #   --remote-name <name>    Remote name for --remote (default: origin)
 #   --github <private|public>  Create a GitHub repo from this local scaffold and push to it
-#   --github-remote-name <name> Remote name for GitHub repo (default: github)
+#   --github-remote-name <name> Remote name for GitHub repo
+#                              (default: origin, or github when --remote is used)
 #   --github-desc <text>    GitHub repo description (default: value from --desc)
 #   --no-dev-branch         Do not create 'develop' branch
 #   -h|--help               Show this help
@@ -41,6 +42,43 @@ need_val(){
   fi
   printf '%s' "$val"
 }
+usage(){
+  cat <<'EOF'
+npj - create and initialize a new git project
+
+Usage:
+  npj <ProjectName> [options]
+
+Examples:
+  npj MyLib --dir ~/code --gitignore c,macos --desc "C utils"
+  npj vpet --desc "virtual pet" --gitignore macos,python \
+      --remote alex@porygon:/srv/nas3/projects
+  npj notes --github private
+  npj demo --remote alex@porygon:/srv/nas3/projects --github public
+
+Options:
+  --dir <path>             Where to create the project (default: $PWD)
+  --desc <text>            README description
+  --gitignore <csv>        Comma-separated templates: c,macos,python,node
+  --license <mit|apache2|none>
+                           Choose a license (default: mit)
+  --lfs                    Initialize Git LFS and track common binaries
+  --remote <user@host:/abs/path>
+                           Create/push to a bare repo on an SSH remote
+  --remote-name <name>     Remote name for --remote (default: origin)
+  --github <private|public>
+                           Create a GitHub repo from this local scaffold and push to it
+  --github-remote-name <name>
+                           Remote name for GitHub repo
+                           (default: origin, or github when --remote is used)
+  --github-desc <text>     GitHub repo description (default: value from --desc)
+  --no-dev-branch          Do not create 'develop' branch
+  -h, --help               Show this help
+
+Environment:
+  NPJ_REMOTE_DEFAULT       If set and --remote omitted, use this as default
+EOF
+}
 
 # ---------- defaults ----------
 DIR="$PWD"
@@ -52,11 +90,14 @@ REMOTE_BASE=""
 REMOTE_NAME="origin"
 MAKE_DEV_BRANCH=1
 GITHUB_VISIBILITY=""
-GITHUB_REMOTE_NAME="github"
+GITHUB_REMOTE_NAME=""
 GITHUB_DESC=""
 
 # ---------- args ----------
-[[ ${1:-} ]] || die "project name required. Try: npj MyProject [options]"
+case "${1-}" in
+  "") die "project name required. Try: npj MyProject [options]" ;;
+  -h|--help) usage; exit 0 ;;
+esac
 NAME="$1"; shift
 
 while [[ $# -gt 0 ]]; do
@@ -79,7 +120,7 @@ while [[ $# -gt 0 ]]; do
     --github-remote-name) GITHUB_REMOTE_NAME="$(need_val --github-remote-name "${2-}")"; shift 2;;
     --github-desc)   GITHUB_DESC="$(need_val --github-desc "${2-}")"; shift 2;;
     --no-dev-branch) MAKE_DEV_BRANCH=0; shift;;
-    -h|--help) sed -n '1,120p' "$0"; exit 0;;
+    -h|--help) usage; exit 0;;
     *) die "unknown option: $1";;
   esac
 done
@@ -93,6 +134,14 @@ if [[ -z "$GITHUB_DESC" ]]; then
   GITHUB_DESC="$DESC"
 fi
 
+if [[ -n "$GITHUB_VISIBILITY" && -z "$GITHUB_REMOTE_NAME" ]]; then
+  if [[ -n "$REMOTE_BASE" ]]; then
+    GITHUB_REMOTE_NAME="github"
+  else
+    GITHUB_REMOTE_NAME="origin"
+  fi
+fi
+
 # ---------- paths ----------
 PROJECT_DIR="${DIR%/}/${NAME}"
 
@@ -101,8 +150,13 @@ if [[ -e "$PROJECT_DIR/.git" ]]; then
   die "target already a git repo: $PROJECT_DIR (remove .git or choose another --dir)"
 fi
 
-if [[ -n "$GITHUB_VISIBILITY" && "$GITHUB_REMOTE_NAME" == "$REMOTE_NAME" ]]; then
+if [[ -n "$GITHUB_VISIBILITY" && -n "$REMOTE_BASE" && "$GITHUB_REMOTE_NAME" == "$REMOTE_NAME" ]]; then
   die "--github-remote-name must differ from --remote-name when using both remotes"
+fi
+
+if [[ -n "$GITHUB_VISIBILITY" ]]; then
+  command -v gh >/dev/null 2>&1 || die "gh CLI not found. Install GitHub CLI first."
+  gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
 fi
 
 mkdir -p "$PROJECT_DIR"
@@ -293,9 +347,6 @@ fi
 
 # ---------- optional GitHub repo via gh ----------
 if [[ -n "$GITHUB_VISIBILITY" ]]; then
-  command -v gh >/dev/null 2>&1 || die "gh CLI not found. Install GitHub CLI first."
-  gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
-
   echo ">> Creating GitHub repo: ${NAME} (${GITHUB_VISIBILITY})"
 
   gh_args=(repo create "$NAME" "--$GITHUB_VISIBILITY" --source=. --remote="$GITHUB_REMOTE_NAME")
@@ -315,6 +366,6 @@ if [[ -n "$REMOTE_BASE" ]]; then
   echo "   SSH remote:    $REMOTE_NAME -> ${REMOTE_HOST}:${REMOTE_REPO_DIR}"
 fi
 if [[ -n "$GITHUB_VISIBILITY" ]]; then
-  echo "   GitHub remote: $GITHUB_REMOTE_NAME -> github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo "<created>")"
+  echo "   GitHub remote: $GITHUB_REMOTE_NAME -> $(git remote get-url "$GITHUB_REMOTE_NAME" 2>/dev/null || echo "<created>")"
 fi
 git status --short --branch

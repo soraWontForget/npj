@@ -1,45 +1,51 @@
-````markdown
-# npj — New Project Bootstrapper
+# npj - New Project Bootstrapper
 
-`npj` is a Bash script that creates and initializes a new Git repository with your preferred defaults.  
-It can also automatically create a bare remote repository (e.g., on your NAS) and push the new project to it.
+`npj` is a Bash script that creates and initializes a new Git repository with your preferred defaults.
+It can also create a bare remote repository, publish the project to GitHub, and push the initial branches.
 
 ---
 
 ## Features
 
-- Initializes a new Git repo with:
-  - `main` as the default branch
-  - Preconfigured `.gitattributes` and `.gitignore`
-  - README file with your description
-  - MIT or Apache 2 license (or none)
-  - Optional Git LFS setup
-  - Pre-commit hook to block files over 100 MB
+- Initializes a new Git repo with `main` as the default branch
+- Creates a README with your project description
+- Adds preconfigured `.gitattributes` and `.gitignore` files
+- Adds an MIT or Apache 2 license, or no license
+- Optionally initializes Git LFS for common binary assets
+- Adds a pre-commit hook to block files over 100 MB
 - Optionally creates a `develop` branch
-- Optionally creates a **bare** remote repo and pushes your branches to it
-- Works on **macOS** (Bash 3.2+) and modern Linux
-- Provides common `.gitignore` templates (`c`, `macos`, `python`, `node`)
+- Optionally creates a bare SSH remote repo and pushes your branches to it
+- Optionally creates a GitHub repo with `gh` and pushes your branches to it
+- Works on macOS with Bash 3.2+ and modern Linux
+- Provides common `.gitignore` templates: `c`, `macos`, `python`, `node`
 
 ---
 
 ## Installation
 
-1. Save the `npj` script somewhere on your `$PATH` (e.g., `~/bin/npj`):
+1. Save the `npj` script somewhere on your `$PATH`, such as `~/bin/npj`:
 
    ```bash
    mkdir -p ~/bin
-   mv npj ~/bin/
+   mv npj.sh ~/bin/npj
    chmod +x ~/bin/npj
-````
+   ```
 
-2. (Optional) Add `~/bin` to your `$PATH` if not already there:
+2. Add `~/bin` to your `$PATH` if it is not already there:
 
    ```bash
    echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
    source ~/.bashrc
    ```
 
-3. (Optional) Set a default remote path so you don’t need to pass `--remote` every time:
+3. Optional: install and authenticate the GitHub CLI if you want to use `--github`:
+
+   ```bash
+   brew install gh
+   gh auth login
+   ```
+
+4. Optional: set a default SSH remote path so you do not need to pass `--remote` every time:
 
    ```bash
    echo 'export NPJ_REMOTE_DEFAULT="alex@porygon:/srv/nas3/projects"' >> ~/.bashrc
@@ -57,13 +63,16 @@ npj <ProjectName> [options]
 
 | Option                           | Description                                                              |
 | -------------------------------- | ------------------------------------------------------------------------ |
-| `--dir <path>`                   | Where to create the project (default: current directory).                |
+| `--dir <path>`                   | Where to create the project. Default: current directory.                 |
 | `--desc <text>`                  | Description to include in README.                                        |
-| `--gitignore <csv>`              | Comma-separated `.gitignore` templates (`c`, `macos`, `python`, `node`). |
-| `--license <mit\|apache2\|none>` | Choose license (default: `mit`).                                         |
+| `--gitignore <csv>`              | Comma-separated `.gitignore` templates: `c`, `macos`, `python`, `node`.  |
+| `--license <mit\|apache2\|none>` | Choose license. Default: `mit`.                                          |
 | `--lfs`                          | Initialize Git LFS and track common binary types.                        |
-| `--remote <user@host:/abs/path>` | Create a bare remote repo and push to it.                                |
-| `--remote-name <name>`           | Remote name (default: `origin`).                                         |
+| `--remote <user@host:/abs/path>` | Create a bare SSH remote repo and push to it.                            |
+| `--remote-name <name>`           | Remote name for `--remote`. Default: `origin`.                           |
+| `--github <private\|public>`     | Create a GitHub repo and push to it.                                     |
+| `--github-remote-name <name>`    | Remote name for the GitHub repo. Default: `origin`, or `github` when `--remote` is also used. |
+| `--github-desc <text>`           | GitHub repo description. Default: value from `--desc`.                   |
 | `--no-dev-branch`                | Skip creating a `develop` branch.                                        |
 | `-h`, `--help`                   | Show script help.                                                        |
 
@@ -77,7 +86,22 @@ npj <ProjectName> [options]
 npj MyLib --dir ~/code --gitignore c,macos --desc "C utilities library"
 ```
 
-**Local + remote (NAS):**
+**Publish to GitHub:**
+
+```bash
+npj NotesApp --desc "Personal notes app" --gitignore node --github private
+```
+
+**Publish a public GitHub repo with a custom GitHub description:**
+
+```bash
+npj TinyTool \
+  --desc "Local development helper" \
+  --github public \
+  --github-desc "Small helper tools for local development"
+```
+
+**Local + bare SSH remote, such as a NAS:**
 
 ```bash
 npj wash-dev \
@@ -87,7 +111,18 @@ npj wash-dev \
   --remote alex@porygon:/srv/nas3/projects
 ```
 
-**Using default remote (with NPJ\_REMOTE\_DEFAULT set):**
+**Local + bare SSH remote + GitHub:**
+
+```bash
+npj GameArt \
+  --desc "Art assets for the game" \
+  --gitignore macos \
+  --lfs \
+  --remote alex@porygon:/srv/nas3/projects \
+  --github private
+```
+
+**Using default SSH remote with `NPJ_REMOTE_DEFAULT` set:**
 
 ```bash
 npj GameArt --desc "Art assets for the game" --gitignore macos --lfs
@@ -103,12 +138,9 @@ npj MyOneBranchProject --no-dev-branch
 
 ## Notes
 
-* If running with `--remote`, ensure you have SSH access to the remote host.
-* To avoid password prompts, set up SSH keys:
-
-  ```bash
-  ssh-keygen -t ed25519 -C "you@example.com"
-  ssh-copy-id alex@porygon
-  ```
-* The script will abort if the target directory already contains a `.git/` folder.
-
+- With only `--github`, the GitHub remote defaults to `origin`.
+- With both `--remote` and `--github`, the SSH remote defaults to `origin` and the GitHub remote defaults to `github`.
+- `--github` publishes to the account authenticated with `gh auth login`.
+- If `NPJ_REMOTE_DEFAULT` is set and you also pass `--github`, `npj` creates both remotes unless you unset `NPJ_REMOTE_DEFAULT` for that command.
+- If running with `--remote`, ensure you have SSH access to the remote host.
+- The script aborts if the target directory already contains a `.git/` folder.
