@@ -3,6 +3,7 @@
 #       and/or publish it to GitHub with gh
 # usage:
 #   npj <ProjectName> [options]
+#   npj publish-existing [repo-path] --github <private|public> [options]
 #
 # examples:
 #   npj MyLib --dir ~/code --gitignore c,macos --desc "C utils"
@@ -10,6 +11,7 @@
 #       --remote alex@porygon:/srv/nas3/projects
 #   npj notes --github private
 #   npj demo --remote alex@porygon:/srv/nas3/projects --github public
+#   npj publish-existing ~/code/MyApp --github private
 #
 # options:
 #   --dir <path>            Where to create the project (default: $PWD)
@@ -22,7 +24,13 @@
 #   --github <private|public>  Create a GitHub repo from this local scaffold and push to it
 #   --github-remote-name <name> Remote name for GitHub repo
 #                              (default: origin, or github when --remote is used)
+#   --github-owner <owner> GitHub owner/org for publish-existing
+#   --github-name <name> GitHub repo name for publish-existing
 #   --github-desc <text>    GitHub repo description (default: value from --desc)
+#   --push-all-branches     In publish-existing mode, push all local branches
+#   --push-tags             In publish-existing mode, push tags after branches
+#   --allow-dirty           In publish-existing mode, allow uncommitted local changes
+#   --dry-run               Print publish-existing actions without creating or pushing
 #   --no-dev-branch         Do not create 'develop' branch
 #   -h|--help               Show this help
 #
@@ -34,6 +42,7 @@ set -euo pipefail
 # ---------- helpers ----------
 die(){ echo "error: $*" >&2; exit 1; }
 lc(){ printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]'; }
+remote_exists(){ git remote get-url "$1" >/dev/null 2>&1; }
 need_val(){
   # usage: need_val <opt-name> <maybe-value>
   local opt="$1"; local val="${2-}"
@@ -48,6 +57,7 @@ npj - create and initialize a new git project
 
 Usage:
   npj <ProjectName> [options]
+  npj publish-existing [repo-path] --github <private|public> [options]
 
 Examples:
   npj MyLib --dir ~/code --gitignore c,macos --desc "C utils"
@@ -55,9 +65,12 @@ Examples:
       --remote alex@porygon:/srv/nas3/projects
   npj notes --github private
   npj demo --remote alex@porygon:/srv/nas3/projects --github public
+  npj publish-existing ~/code/MyApp --github private
+  npj publish-existing . --github public --github-owner my-org --push-tags
 
 Options:
   --dir <path>             Where to create the project (default: $PWD)
+                           With publish-existing, repo path to publish
   --desc <text>            README description
   --gitignore <csv>        Comma-separated templates: c,macos,python,node
   --license <mit|apache2|none>
@@ -71,7 +84,13 @@ Options:
   --github-remote-name <name>
                            Remote name for GitHub repo
                            (default: origin, or github when --remote is used)
+  --github-owner <owner>   GitHub owner/org for publish-existing
+  --github-name <name>     GitHub repo name for publish-existing
   --github-desc <text>     GitHub repo description (default: value from --desc)
+  --push-all-branches      With publish-existing, push all local branches
+  --push-tags              With publish-existing, push tags after branches
+  --allow-dirty            With publish-existing, allow uncommitted local changes
+  --dry-run                With publish-existing, print actions without running them
   --no-dev-branch          Do not create 'develop' branch
   -h, --help               Show this help
 
@@ -82,6 +101,8 @@ EOF
 
 # ---------- defaults ----------
 DIR="$PWD"
+MODE="create"
+PUBLISH_PATH=""
 DESC=""
 GITIGNORE_TEMPLATES=""
 LICENSE="mit"
@@ -92,17 +113,128 @@ MAKE_DEV_BRANCH=1
 GITHUB_VISIBILITY=""
 GITHUB_REMOTE_NAME=""
 GITHUB_DESC=""
+GITHUB_OWNER=""
+GITHUB_REPO_NAME=""
+PUSH_ALL_BRANCHES=0
+PUSH_TAGS=0
+ALLOW_DIRTY=0
+DRY_RUN=0
+
+run_or_echo(){
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf 'dry-run:'
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
+}
+
+require_github_cli(){
+  if [[ $DRY_RUN -eq 1 ]]; then
+    return 0
+  fi
+  command -v gh >/dev/null 2>&1 || die "gh CLI not found. Install GitHub CLI first."
+  gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
+}
+
+publish_existing_to_github(){
+  [[ -n "$GITHUB_VISIBILITY" ]] || die "publish-existing requires --github private|public"
+  [[ -z "$REMOTE_BASE" ]] || die "publish-existing does not support --remote; use --github-remote-name for the GitHub remote"
+
+  [[ -n "$PUBLISH_PATH" ]] || PUBLISH_PATH="$DIR"
+  [[ -d "$PUBLISH_PATH" ]] || die "publish-existing path is not a directory: $PUBLISH_PATH"
+
+  cd "$PUBLISH_PATH"
+  local repo_root
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || die "publish-existing path is not inside a git repo: $PUBLISH_PATH"
+  cd "$repo_root"
+
+  git rev-parse --verify HEAD >/dev/null 2>&1 || die "existing repo has no commits to publish"
+
+  local branch
+  branch="$(git branch --show-current)"
+  [[ -n "$branch" ]] || die "cannot publish from a detached HEAD; check out a branch first"
+
+  if [[ $ALLOW_DIRTY -eq 0 && -n "$(git status --porcelain)" ]]; then
+    die "working tree has uncommitted changes. Commit/stash them or pass --allow-dirty to publish committed history anyway."
+  fi
+
+  if [[ -z "$GITHUB_REPO_NAME" ]]; then
+    GITHUB_REPO_NAME="$(basename "$repo_root")"
+  fi
+
+  if [[ -z "$GITHUB_REMOTE_NAME" ]]; then
+    if remote_exists origin; then
+      GITHUB_REMOTE_NAME="github"
+    else
+      GITHUB_REMOTE_NAME="origin"
+    fi
+  fi
+
+  if remote_exists "$GITHUB_REMOTE_NAME"; then
+    die "remote already exists: $GITHUB_REMOTE_NAME. Choose another --github-remote-name."
+  fi
+
+  local github_repo="$GITHUB_REPO_NAME"
+  if [[ -n "$GITHUB_OWNER" && "$github_repo" != */* ]]; then
+    github_repo="${GITHUB_OWNER}/${github_repo}"
+  fi
+
+  echo ">> Publishing existing repo: $repo_root"
+  echo ">> Creating GitHub repo: ${github_repo} (${GITHUB_VISIBILITY})"
+
+  local gh_args
+  gh_args=(repo create "$github_repo" "--$GITHUB_VISIBILITY" --source=. --remote="$GITHUB_REMOTE_NAME")
+  if [[ -n "$GITHUB_DESC" ]]; then
+    gh_args+=(--description "$GITHUB_DESC")
+  fi
+  run_or_echo gh "${gh_args[@]}"
+
+  if [[ $PUSH_ALL_BRANCHES -eq 1 ]]; then
+    run_or_echo git push -u "$GITHUB_REMOTE_NAME" --all
+  else
+    run_or_echo git push -u "$GITHUB_REMOTE_NAME" "$branch"
+  fi
+
+  if [[ $PUSH_TAGS -eq 1 ]]; then
+    run_or_echo git push "$GITHUB_REMOTE_NAME" --tags
+  fi
+
+  echo "✅ Published existing repo: $repo_root"
+  echo "   GitHub remote: $GITHUB_REMOTE_NAME -> $(git remote get-url "$GITHUB_REMOTE_NAME" 2>/dev/null || echo "<created after dry-run>")"
+  git status --short --branch
+}
 
 # ---------- args ----------
 case "${1-}" in
   "") die "project name required. Try: npj MyProject [options]" ;;
   -h|--help) usage; exit 0 ;;
+  publish-existing)
+    MODE="publish-existing"
+    shift
+    if [[ $# -gt 0 && "${1-}" != --* ]]; then
+      PUBLISH_PATH="$1"
+      shift
+    fi
+    NAME=""
+    ;;
+  *)
+    NAME="$1"
+    shift
+    ;;
 esac
-NAME="$1"; shift
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dir)         DIR="$(need_val --dir "${2-}")"; shift 2;;
+    --dir)
+      if [[ "$MODE" == "publish-existing" ]]; then
+        PUBLISH_PATH="$(need_val --dir "${2-}")"
+      else
+        DIR="$(need_val --dir "${2-}")"
+      fi
+      shift 2
+      ;;
     --desc)        DESC="$(need_val --desc "${2-}")"; shift 2;;
     --gitignore)   GITIGNORE_TEMPLATES="$(need_val --gitignore "${2-}")"; shift 2;;
     --license)     LICENSE="$(lc "$(need_val --license "${2-}")")"; shift 2;;
@@ -118,7 +250,13 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --github-remote-name) GITHUB_REMOTE_NAME="$(need_val --github-remote-name "${2-}")"; shift 2;;
+    --github-owner) GITHUB_OWNER="$(need_val --github-owner "${2-}")"; shift 2;;
+    --github-name) GITHUB_REPO_NAME="$(need_val --github-name "${2-}")"; shift 2;;
     --github-desc)   GITHUB_DESC="$(need_val --github-desc "${2-}")"; shift 2;;
+    --push-all-branches) PUSH_ALL_BRANCHES=1; shift;;
+    --push-tags) PUSH_TAGS=1; shift;;
+    --allow-dirty) ALLOW_DIRTY=1; shift;;
+    --dry-run) DRY_RUN=1; shift;;
     --no-dev-branch) MAKE_DEV_BRANCH=0; shift;;
     -h|--help) usage; exit 0;;
     *) die "unknown option: $1";;
@@ -126,12 +264,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Default remote if flag omitted but env is set
-if [[ -z "$REMOTE_BASE" && -n "${NPJ_REMOTE_DEFAULT-}" ]]; then
+if [[ "$MODE" == "create" && -z "$REMOTE_BASE" && -n "${NPJ_REMOTE_DEFAULT-}" ]]; then
   REMOTE_BASE="$NPJ_REMOTE_DEFAULT"
 fi
 
 if [[ -z "$GITHUB_DESC" ]]; then
   GITHUB_DESC="$DESC"
+fi
+
+if [[ "$MODE" == "publish-existing" ]]; then
+  require_github_cli
+  publish_existing_to_github
+  exit 0
+fi
+
+if [[ -n "$GITHUB_OWNER" || -n "$GITHUB_REPO_NAME" || $PUSH_ALL_BRANCHES -eq 1 || $PUSH_TAGS -eq 1 || $ALLOW_DIRTY -eq 1 || $DRY_RUN -eq 1 ]]; then
+  die "--github-owner, --github-name, --push-all-branches, --push-tags, --allow-dirty, and --dry-run are only supported with publish-existing"
 fi
 
 if [[ -n "$GITHUB_VISIBILITY" && -z "$GITHUB_REMOTE_NAME" ]]; then
@@ -155,8 +303,7 @@ if [[ -n "$GITHUB_VISIBILITY" && -n "$REMOTE_BASE" && "$GITHUB_REMOTE_NAME" == "
 fi
 
 if [[ -n "$GITHUB_VISIBILITY" ]]; then
-  command -v gh >/dev/null 2>&1 || die "gh CLI not found. Install GitHub CLI first."
-  gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
+  require_github_cli
 fi
 
 mkdir -p "$PROJECT_DIR"
