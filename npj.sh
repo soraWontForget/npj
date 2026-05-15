@@ -39,20 +39,23 @@
 
 set -euo pipefail
 
-# ---------- helpers ----------
-die(){ echo "error: $*" >&2; exit 1; }
-lc(){ printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]'; }
-remote_exists(){ git remote get-url "$1" >/dev/null 2>&1; }
-need_val(){
-  # usage: need_val <opt-name> <maybe-value>
-  local opt="$1"; local val="${2-}"
-  if [[ -z "${val-}" || "${val}" == --* ]]; then
-    die "$opt requires a value. e.g. $opt /abs/path or $opt user@host:/abs/path"
+# ---------- helper functions ----------
+die(){ echo "error: $*" >&2; exit 1; } # kill with kindness
+lc(){ printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]'; } # only lowercase letters
+remote_exists(){ git remote get-url "$1" >/dev/null 2>&1; } # check if git remote exists
+
+# usage: need_val <opt-name> <maybe-value>
+need_val(){ # validate that an option value exists and is not another option
+  local opt="$1"; local val="${2-}" # the ${var-} syntax prevents "unbound variable" error when $2 is missing
+  if [[ -z "${val-}" || "${val}" == --* ]]; then # if value is empty or looks like another option, complain
+    die "$opt requires a value. e.g. $opt /abs/path or $opt user@host:/abs/path" # kill with kindness
   fi
-  printf '%s' "$val"
+  printf '%s' "$val" # print the value for assignment
 }
+
+# Print usage information
 usage(){
-  cat <<'EOF'
+  cat <<'EOF' # redirecting a literal block to preserve formatting and $ signs
 npj - create and initialize a new git project
 
 Usage:
@@ -99,7 +102,7 @@ Environment:
 EOF
 }
 
-# ---------- defaults ----------
+# ---------- default environment variables ----------
 DIR="$PWD"
 MODE="create"
 PUBLISH_PATH=""
@@ -120,50 +123,71 @@ PUSH_TAGS=0
 ALLOW_DIRTY=0
 DRY_RUN=0
 
+# run a command or print it if dry-run
 run_or_echo(){
-  if [[ $DRY_RUN -eq 1 ]]; then
+  if [[ $DRY_RUN -eq 1 ]]; then # if dry-run, print the command instead of running it
     printf 'dry-run:'
     printf ' %q' "$@"
     printf '\n'
-  else
+  else # if not dry-run, run the command normally
     "$@"
   fi
 }
 
+# In publish-existing mode, validate that gh CLI is installed and authenticated (required for GitHub repo creation and pushing)
 require_github_cli(){
-  if [[ $DRY_RUN -eq 1 ]]; then
+  if [[ $DRY_RUN -eq 1 ]]; then # in dry-run, skip actual checks since we won't run gh commands anyway
     return 0
   fi
+  # Check if gh CLI is installed, kill with kindness if not
   command -v gh >/dev/null 2>&1 || die "gh CLI not found. Install GitHub CLI first."
+
+  # Check if gh CLI is authenticated, kill with kindness if not
   gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
 }
 
+# Publish an existing local repo to GitHub, with options for repo name, owner, description, and which branches/tags to push
 publish_existing_to_github(){
+  # Validate GitHub options, ensuring visibility is set and valid, and that unsupported options are not used. Kill with kindness if any checks fail.
   [[ -n "$GITHUB_VISIBILITY" ]] || die "publish-existing requires --github private|public"
+
+  # Remote options are not supported in publish-existing to avoid confusion and complexity; users should set up remotes manually after publishing if needed
   [[ -z "$REMOTE_BASE" ]] || die "publish-existing does not support --remote; use --github-remote-name for the GitHub remote"
 
+  # If a path was provided as an argument, use it; otherwise default to current directory. Validate that the path is a git repo with commits and a non-detached HEAD.
+  # Kill with kindness if check fails.
   [[ -n "$PUBLISH_PATH" ]] || PUBLISH_PATH="$DIR"
+
+  # Validate that the publish path exists and is a directory. Kill with kindness if not.
   [[ -d "$PUBLISH_PATH" ]] || die "publish-existing path is not a directory: $PUBLISH_PATH"
 
+  # Change to the publish path and validate that it's inside a git repository. Kill with kindness if not. Then change to the repo root for consistent git commands.
   cd "$PUBLISH_PATH"
   local repo_root
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || die "publish-existing path is not inside a git repo: $PUBLISH_PATH"
   cd "$repo_root"
 
+  # Validate that the repo has commits (i.e. HEAD is valid). Kill with kindness if not, since GitHub cannot create a repo from an empty git history.
   git rev-parse --verify HEAD >/dev/null 2>&1 || die "existing repo has no commits to publish"
 
+  # Validate that the HEAD is not detached, since publishing from a detached HEAD can lead to confusion and unintended consequences. Kill with kindness if check fails.
   local branch
   branch="$(git branch --show-current)"
   [[ -n "$branch" ]] || die "cannot publish from a detached HEAD; check out a branch first"
 
+  # If the working tree has uncommitted changes and --allow-dirty is not set, kill with kindness and ask the user to commit/stash changes or use --allow-dirty to proceed anyway.
+  # This prevents accidentally publishing a repo with unintended local changes.
   if [[ $ALLOW_DIRTY -eq 0 && -n "$(git status --porcelain)" ]]; then
     die "working tree has uncommitted changes. Commit/stash them or pass --allow-dirty to publish committed history anyway."
   fi
 
+  # If the GitHub repo name is not provided, default to the basename of the repo root directory. This provides a sensible default name for the GitHub repo based on the local project.
   if [[ -z "$GITHUB_REPO_NAME" ]]; then
     GITHUB_REPO_NAME="$(basename "$repo_root")"
   fi
 
+  # If the GitHub remote name is not provided, default to "github" if "origin" already exists (to avoid clobbering an existing origin), or "origin" otherwise.
+  # This provides a sensible default remote name for the GitHub repo while avoiding conflicts with an existing origin remote.
   if [[ -z "$GITHUB_REMOTE_NAME" ]]; then
     if remote_exists origin; then
       GITHUB_REMOTE_NAME="github"
@@ -172,18 +196,25 @@ publish_existing_to_github(){
     fi
   fi
 
+  # Validate that the GitHub remote does not already exist. Kill with kindness if it does.
   if remote_exists "$GITHUB_REMOTE_NAME"; then
     die "remote already exists: $GITHUB_REMOTE_NAME. Choose another --github-remote-name."
   fi
 
+  # Construct the full GitHub repo name, including owner if provided. If the user provided a repo name without an owner but did provide a GitHub owner, prepend the owner to the repo name.
+  # This allows for flexible naming while ensuring the repo is created under the correct owner/org.
   local github_repo="$GITHUB_REPO_NAME"
   if [[ -n "$GITHUB_OWNER" && "$github_repo" != */* ]]; then
     github_repo="${GITHUB_OWNER}/${github_repo}"
   fi
 
+  # Create the GitHub repo using gh CLI, specifying the source as the current directory and the remote name. Include the description if provided.
+  # Then push the current branch (and optionally all branches and tags) to the new GitHub remote. Use run_or_echo to respect dry-run mode. Finally, print a success message with the GitHub remote URL and the current git status.
   echo ">> Publishing existing repo: $repo_root"
   echo ">> Creating GitHub repo: ${github_repo} (${GITHUB_VISIBILITY})"
 
+  # Construct the gh repo create command with the appropriate arguments based on the provided options. Use an array to handle optional arguments cleanly.
+  # Then run the command using run_or_echo to respect dry-run mode.
   local gh_args
   gh_args=(repo create "$github_repo" "--$GITHUB_VISIBILITY" --source=. --remote="$GITHUB_REMOTE_NAME")
   if [[ -n "$GITHUB_DESC" ]]; then
@@ -191,23 +222,30 @@ publish_existing_to_github(){
   fi
   run_or_echo gh "${gh_args[@]}"
 
+  # Push to the new GitHub remote. If --push-all-branches is set, push all branches; otherwise, push only the current branch.
+  # If --push-tags is set, push tags after pushing branches. Use run_or_echo to respect dry-run mode.
   if [[ $PUSH_ALL_BRANCHES -eq 1 ]]; then
     run_or_echo git push -u "$GITHUB_REMOTE_NAME" --all
   else
     run_or_echo git push -u "$GITHUB_REMOTE_NAME" "$branch"
   fi
 
+  # If the user requested to push tags, push them to the GitHub remote. This allows users to include their tag history in the published repo if desired.
   if [[ $PUSH_TAGS -eq 1 ]]; then
     run_or_echo git push "$GITHUB_REMOTE_NAME" --tags
   fi
 
+  # Print a success message indicating that the existing repo has been published, along with the GitHub remote URL and the current git status.
+  #This provides confirmation to the user that the publish operation was successful and shows the new remote configuration.
   echo "✅ Published existing repo: $repo_root"
   echo "   GitHub remote: $GITHUB_REMOTE_NAME -> $(git remote get-url "$GITHUB_REMOTE_NAME" 2>/dev/null || echo "<created after dry-run>")"
   git status --short --branch
 }
 
 # ---------- args ----------
-case "${1-}" in
+# The first argument is either the project name or the "publish-existing" command.
+# Handle those cases separately since publish-existing has a different meaning for the first argument and different required/optional flags.
+case "${1-}" in 
   "") die "project name required. Try: npj MyProject [options]" ;;
   -h|--help) usage; exit 0 ;;
   publish-existing)
@@ -225,8 +263,11 @@ case "${1-}" in
     ;;
 esac
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
+# Parse the remaining arguments in a loop, handling each supported flag and its value.
+# Use need_val to validate that flags that require values are provided with valid values.
+# Set the appropriate variables based on the flags.
+while [[ $# -gt 0 ]]; do # loop over remaining arguments
+  case "$1" in # handle each supported flag
     --dir)
       if [[ "$MODE" == "publish-existing" ]]; then
         PUBLISH_PATH="$(need_val --dir "${2-}")"
@@ -268,20 +309,28 @@ if [[ "$MODE" == "create" && -z "$REMOTE_BASE" && -n "${NPJ_REMOTE_DEFAULT-}" ]]
   REMOTE_BASE="$NPJ_REMOTE_DEFAULT"
 fi
 
+# Default GitHub description to README description if not provided explicitly.
+# This ensures the GitHub repo has a description even if the user only provided one description for both README and GitHub.
 if [[ -z "$GITHUB_DESC" ]]; then
   GITHUB_DESC="$DESC"
 fi
 
+# In publish-existing mode, require GitHub CLI and run the publish function, then exit.
+# The publish function will handle all the necessary steps to create the GitHub repo and push the existing local repo to it, respecting options like which branches/tags to push and whether to allow dirty state.
 if [[ "$MODE" == "publish-existing" ]]; then
   require_github_cli
   publish_existing_to_github
   exit 0
 fi
 
+# In publish-existing mode, the GitHub-related options have specific meanings and some options are not supported.
+# Validate that unsupported options are not used and that required options are provided. Kill with kindness if any checks fail.
 if [[ -n "$GITHUB_OWNER" || -n "$GITHUB_REPO_NAME" || $PUSH_ALL_BRANCHES -eq 1 || $PUSH_TAGS -eq 1 || $ALLOW_DIRTY -eq 1 || $DRY_RUN -eq 1 ]]; then
   die "--github-owner, --github-name, --push-all-branches, --push-tags, --allow-dirty, and --dry-run are only supported with publish-existing"
 fi
 
+# If the GitHub remote name is not provided, default to "github" if "origin" already exists (to avoid clobbering an existing origin), or "origin" otherwise.
+# This provides a sensible default remote name for the GitHub repo while avoiding conflicts with an existing origin remote.
 if [[ -n "$GITHUB_VISIBILITY" && -z "$GITHUB_REMOTE_NAME" ]]; then
   if [[ -n "$REMOTE_BASE" ]]; then
     GITHUB_REMOTE_NAME="github"
@@ -291,26 +340,31 @@ if [[ -n "$GITHUB_VISIBILITY" && -z "$GITHUB_REMOTE_NAME" ]]; then
 fi
 
 # ---------- paths ----------
-PROJECT_DIR="${DIR%/}/${NAME}"
+PROJECT_DIR="${DIR%/}/${NAME}" # ensure no trailing slash and append project name
 
 # ---------- safety checks ----------
+# Validate that the project directory does not already exist as a git repository. Kill with kindness if it does, since we don't want to accidentally overwrite an existing repo.
 if [[ -e "$PROJECT_DIR/.git" ]]; then
   die "target already a git repo: $PROJECT_DIR (remove .git or choose another --dir)"
 fi
 
+# If both a GitHub repo and a remote repo are being created, ensure they do not have the same remote name to avoid confusion and conflicts. Kill with kindness if they do.
 if [[ -n "$GITHUB_VISIBILITY" && -n "$REMOTE_BASE" && "$GITHUB_REMOTE_NAME" == "$REMOTE_NAME" ]]; then
   die "--github-remote-name must differ from --remote-name when using both remotes"
 fi
 
+# If a GitHub repo is being created, ensure the GitHub CLI is installed and authenticated before proceeding, since it's required for repo creation and pushing.
+# Kill with kindness if checks fail.
 if [[ -n "$GITHUB_VISIBILITY" ]]; then
   require_github_cli
 fi
 
+# ---------- create project ----------
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
 
 # ---------- init repo ----------
-git init --initial-branch=main >/dev/null
+git init --initial-branch=main >/dev/null # prefer main, but fall back to default if not supported (older git versions)
 
 # .gitattributes (sane defaults)
 cat > .gitattributes <<'EOF'
@@ -324,7 +378,8 @@ cat > .gitattributes <<'EOF'
 *.pdf binary
 EOF
 
-# README
+# For README file, use the provided description or a default message if no description is given.
+# This ensures the README has some content even if the user did not provide a description.
 cat > README.md <<EOF
 # $NAME
 
@@ -422,14 +477,17 @@ E
   esac
 }
 
-: > .gitignore
-lowered_templates="$(lc "$GITIGNORE_TEMPLATES")"
-IFS=',' read -r -a TEMPL <<< "$lowered_templates"
+: > .gitignore # redirect "nothing" to .gitignore to create or clear it
+lowered_templates="$(lc "$GITIGNORE_TEMPLATES")" # convert to lowercase for case-insensitive matching
+IFS=',' read -r -a TEMPL <<< "$lowered_templates" # split by comma into array
+
+# loop over templates; if any, and append the corresponding ignore patterns to .gitignore
 for t in "${TEMPL[@]:-}"; do
   [[ -n "$t" ]] && new_ignore "$t" >> .gitignore
 done
 
-# Optional Git LFS
+# Optional Git LFS. Git LFS is great for handling large binary files, and this option initializes it and sets up tracking for common binary types.
+# If git-lfs is not installed, it will print a warning but continue without LFS support.
 if [[ $USE_LFS -eq 1 ]]; then
   if command -v git-lfs >/dev/null 2>&1; then
     git lfs install --local >/dev/null 2>&1 || true
@@ -462,8 +520,8 @@ EOF
 chmod +x "$HOOKS_DIR/pre-commit"
 
 # Initial commit
-git add .
-git commit -m "chore: project scaffold for ${NAME}" >/dev/null
+git add . # add all the files in the directory that were just created.
+git commit -m "chore: project scaffold for ${NAME}" >/dev/null # create initial commit with a standard message. Do it silently to avoid cluttering output, since the user will see a final status at the end.
 
 # Optional develop branch
 if [[ $MAKE_DEV_BRANCH -eq 1 ]]; then
@@ -472,7 +530,7 @@ fi
 
 # ---------- optional remote bare repo ----------
 if [[ -n "$REMOTE_BASE" ]]; then
-  # Validate user@host:/abs/path format
+  # Validate user@host:/abs/path format. Kill with kindness if it doesn't match, since we need a valid format to proceed with creating the remote repo.
   case "$REMOTE_BASE" in
     *:/*) : ;; # ok
     *) die "--remote must be in the form user@host:/absolute/path";;
@@ -482,6 +540,7 @@ if [[ -n "$REMOTE_BASE" ]]; then
   REMOTE_REPO_DIR="${REMOTE_BASE_DIR%/}/${NAME}.git"
 
   echo ">> Creating remote bare repo: ${REMOTE_HOST}:${REMOTE_REPO_DIR}"
+  
   # Create base dir; init bare (prefer main if supported; fall back otherwise)
   ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_BASE_DIR' && { git init --bare --initial-branch=main '$REMOTE_REPO_DIR' 2>/dev/null || git init --bare '$REMOTE_REPO_DIR'; }" >/dev/null
 
@@ -493,7 +552,9 @@ if [[ -n "$REMOTE_BASE" ]]; then
 fi
 
 # ---------- optional GitHub repo via gh ----------
-if [[ -n "$GITHUB_VISIBILITY" ]]; then
+# if the user requested a GitHub repo, create it using the gh CLI and push the local scaffold to it.
+# This provides an easy way to get a new GitHub repo set up with the initial project files and commits.
+if [[ -n "$GITHUB_VISIBILITY" ]]; then 
   echo ">> Creating GitHub repo: ${NAME} (${GITHUB_VISIBILITY})"
 
   gh_args=(repo create "$NAME" "--$GITHUB_VISIBILITY" --source=. --remote="$GITHUB_REMOTE_NAME")
@@ -508,6 +569,7 @@ if [[ -n "$GITHUB_VISIBILITY" ]]; then
   fi
 fi
 
+# ---------- success and done! ----------
 echo "✅ Created project at: $PROJECT_DIR"
 if [[ -n "$REMOTE_BASE" ]]; then
   echo "   SSH remote:    $REMOTE_NAME -> ${REMOTE_HOST}:${REMOTE_REPO_DIR}"
