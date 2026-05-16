@@ -50,7 +50,7 @@ or publish an existing local Git repository to GitHub.
 4. Optional: set a default SSH remote path so you do not need to pass `--remote` every time:
 
    ```bash
-   echo 'export NPJ_REMOTE_DEFAULT="alex@porygon:/srv/nas3/projects"' >> ~/.bashrc
+   echo 'export NPJ_REMOTE_DEFAULT="username@ipaddress:/path/to/folder"' >> ~/.bashrc
    ```
 
 ---
@@ -140,7 +140,7 @@ npj wash-dev \
   --dir ~/projects \
   --desc "Wash development tools" \
   --gitignore c,macos \
-  --remote alex@porygon:/srv/nas3/projects
+  --remote username@ipaddress:/path/to/folder
 ```
 
 **Local + bare SSH remote + GitHub:**
@@ -150,7 +150,7 @@ npj GameArt \
   --desc "Art assets for the game" \
   --gitignore macos \
   --lfs \
-  --remote alex@porygon:/srv/nas3/projects \
+  --remote username@ipaddress:/path/to/folder \
   --github private
 ```
 
