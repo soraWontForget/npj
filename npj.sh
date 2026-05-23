@@ -8,9 +8,9 @@
 # examples:
 #   npj MyLib --dir ~/code --gitignore c,macos --desc "C utils"
 #   npj vpet --desc "virtual pet" --gitignore macos,python \
-#       --remote alex@porygon:/srv/nas3/projects
+#       --remote username@host:/srv/nas3/projects
 #   npj notes --github private
-#   npj demo --remote alex@porygon:/srv/nas3/projects --github public
+#   npj demo --remote username@host:/srv/nas3/projects --github public
 #   npj publish-existing ~/code/MyApp --github private
 #
 # options:
@@ -65,9 +65,9 @@ Usage:
 Examples:
   npj MyLib --dir ~/code --gitignore c,macos --desc "C utils"
   npj vpet --desc "virtual pet" --gitignore macos,python \
-      --remote alex@porygon:/srv/nas3/projects
+      --remote username@host:/srv/nas3/projects
   npj notes --github private
-  npj demo --remote alex@porygon:/srv/nas3/projects --github public
+  npj demo --remote username@host:/srv/nas3/projects --github public
   npj publish-existing ~/code/MyApp --github private
   npj publish-existing . --github public --github-owner my-org --push-tags
 
@@ -535,7 +535,7 @@ if [[ -n "$REMOTE_BASE" ]]; then
     *:/*) : ;; # ok
     *) die "--remote must be in the form user@host:/absolute/path";;
   esac
-  REMOTE_HOST="${REMOTE_BASE%%:*}"     # alex@porygon
+  REMOTE_HOST="${REMOTE_BASE%%:*}"     # username@host
   REMOTE_BASE_DIR="${REMOTE_BASE#*:}"  # /srv/nas3/projects
   REMOTE_REPO_DIR="${REMOTE_BASE_DIR%/}/${NAME}.git"
 
