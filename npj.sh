@@ -3,6 +3,7 @@
 #       and/or publish it to GitHub with gh
 # usage:
 #   npj <ProjectName> [options]
+#   npj list-remote [--remote <user@host:/abs/path>]
 #   npj publish-existing [repo-path] --github <private|public> [options]
 #
 # examples:
@@ -11,6 +12,7 @@
 #       --remote username@host:/srv/nas3/projects
 #   npj notes --github private
 #   npj demo --remote username@host:/srv/nas3/projects --github public
+#   npj list-remote --remote username@host:/srv/nas3/projects
 #   npj publish-existing ~/code/MyApp --github private
 #
 # options:
@@ -19,7 +21,7 @@
 #   --gitignore <csv>       Comma-separated templates: c,macos,python,node
 #   --license <mit|apache2|none>  (default: mit)
 #   --lfs                   Initialize Git LFS and track common binaries
-#   --remote <user@host:/abs/path>   Create/push to bare repo on remote
+#   --remote <user@host:/abs/path>   Create/push to bare repo on remote, or inspect with list-remote
 #   --remote-name <name>    Remote name for --remote (default: origin)
 #   --github <private|public>  Create a GitHub repo from this local scaffold and push to it
 #   --github-remote-name <name> Remote name for GitHub repo
@@ -44,6 +46,17 @@ die(){ echo "error: $*" >&2; exit 1; } # kill with kindness
 lc(){ printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]'; } # only lowercase letters
 remote_exists(){ git remote get-url "$1" >/dev/null 2>&1; } # check if git remote exists
 
+parse_remote_base(){ # split user@host:/absolute/path into globals used by remote operations
+  case "$REMOTE_BASE" in
+    *:/*) : ;; # ok
+    *) die "--remote must be in the form user@host:/absolute/path";;
+  esac
+
+  REMOTE_HOST="${REMOTE_BASE%%:*}"     # username@host
+  REMOTE_BASE_DIR="${REMOTE_BASE#*:}"  # /srv/nas3/projects
+  [[ -n "$REMOTE_HOST" && "$REMOTE_BASE_DIR" == /* ]] || die "--remote must be in the form user@host:/absolute/path"
+}
+
 # usage: need_val <opt-name> <maybe-value>
 need_val(){ # validate that an option value exists and is not another option
   local opt="$1"; local val="${2-}" # the ${var-} syntax prevents "unbound variable" error when $2 is missing
@@ -60,6 +73,7 @@ npj - create and initialize a new git project
 
 Usage:
   npj <ProjectName> [options]
+  npj list-remote [--remote <user@host:/abs/path>]
   npj publish-existing [repo-path] --github <private|public> [options]
 
 Examples:
@@ -68,6 +82,7 @@ Examples:
       --remote username@host:/srv/nas3/projects
   npj notes --github private
   npj demo --remote username@host:/srv/nas3/projects --github public
+  npj list-remote --remote username@host:/srv/nas3/projects
   npj publish-existing ~/code/MyApp --github private
   npj publish-existing . --github public --github-owner my-org --push-tags
 
@@ -81,6 +96,7 @@ Options:
   --lfs                    Initialize Git LFS and track common binaries
   --remote <user@host:/abs/path>
                            Create/push to a bare repo on an SSH remote
+                           With list-remote, remote base to inspect
   --remote-name <name>     Remote name for --remote (default: origin)
   --github <private|public>
                            Create a GitHub repo from this local scaffold and push to it
@@ -144,6 +160,36 @@ require_github_cli(){
 
   # Check if gh CLI is authenticated, kill with kindness if not
   gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
+}
+
+# List first-level bare repositories in the configured SSH remote base directory.
+list_remote_projects(){
+  [[ -n "$REMOTE_BASE" ]] || die "list-remote requires --remote user@host:/absolute/path or NPJ_REMOTE_DEFAULT"
+  parse_remote_base
+
+  echo ">> Remote projects in ${REMOTE_HOST}:${REMOTE_BASE_DIR}" >&2
+  ssh "$REMOTE_HOST" sh -s -- "$REMOTE_BASE_DIR" <<'EOF'
+base_dir=$1
+
+if [ ! -d "$base_dir" ]; then
+  echo "error: remote directory not found: $base_dir" >&2
+  exit 2
+fi
+
+projects=$(
+  for repo in "$base_dir"/*.git; do
+    [ -d "$repo" ] || continue
+    name=${repo##*/}
+    printf '%s\n' "${name%.git}"
+  done | sort
+)
+
+if [ -n "$projects" ]; then
+  printf '%s\n' "$projects"
+else
+  echo "(no projects found)"
+fi
+EOF
 }
 
 # Publish an existing local repo to GitHub, with options for repo name, owner, description, and which branches/tags to push
@@ -248,6 +294,11 @@ publish_existing_to_github(){
 case "${1-}" in 
   "") die "project name required. Try: npj MyProject [options]" ;;
   -h|--help) usage; exit 0 ;;
+  list-remote)
+    MODE="list-remote"
+    shift
+    NAME=""
+    ;;
   publish-existing)
     MODE="publish-existing"
     shift
@@ -266,47 +317,62 @@ esac
 # Parse the remaining arguments in a loop, handling each supported flag and its value.
 # Use need_val to validate that flags that require values are provided with valid values.
 # Set the appropriate variables based on the flags.
-while [[ $# -gt 0 ]]; do # loop over remaining arguments
-  case "$1" in # handle each supported flag
-    --dir)
-      if [[ "$MODE" == "publish-existing" ]]; then
-        PUBLISH_PATH="$(need_val --dir "${2-}")"
-      else
-        DIR="$(need_val --dir "${2-}")"
-      fi
-      shift 2
-      ;;
-    --desc)        DESC="$(need_val --desc "${2-}")"; shift 2;;
-    --gitignore)   GITIGNORE_TEMPLATES="$(need_val --gitignore "${2-}")"; shift 2;;
-    --license)     LICENSE="$(lc "$(need_val --license "${2-}")")"; shift 2;;
-    --lfs)         USE_LFS=1; shift;;
-    --remote)      REMOTE_BASE="$(need_val --remote "${2-}")"; shift 2;;
-    --remote-name) REMOTE_NAME="$(need_val --remote-name "${2-}")"; shift 2;;
-    --github)
-      GITHUB_VISIBILITY="$(lc "$(need_val --github "${2-}")")"
-      case "$GITHUB_VISIBILITY" in
-        private|public) : ;;
-        *) die "--github must be either private or public" ;;
-      esac
-      shift 2
-      ;;
-    --github-remote-name) GITHUB_REMOTE_NAME="$(need_val --github-remote-name "${2-}")"; shift 2;;
-    --github-owner) GITHUB_OWNER="$(need_val --github-owner "${2-}")"; shift 2;;
-    --github-name) GITHUB_REPO_NAME="$(need_val --github-name "${2-}")"; shift 2;;
-    --github-desc)   GITHUB_DESC="$(need_val --github-desc "${2-}")"; shift 2;;
-    --push-all-branches) PUSH_ALL_BRANCHES=1; shift;;
-    --push-tags) PUSH_TAGS=1; shift;;
-    --allow-dirty) ALLOW_DIRTY=1; shift;;
-    --dry-run) DRY_RUN=1; shift;;
-    --no-dev-branch) MAKE_DEV_BRANCH=0; shift;;
-    -h|--help) usage; exit 0;;
-    *) die "unknown option: $1";;
-  esac
-done
+if [[ "$MODE" == "list-remote" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --remote) REMOTE_BASE="$(need_val --remote "${2-}")"; shift 2;;
+      -h|--help) usage; exit 0;;
+      *) die "list-remote supports only --remote; unknown option: $1";;
+    esac
+  done
+else
+  while [[ $# -gt 0 ]]; do # loop over remaining arguments
+    case "$1" in # handle each supported flag
+      --dir)
+        if [[ "$MODE" == "publish-existing" ]]; then
+          PUBLISH_PATH="$(need_val --dir "${2-}")"
+        else
+          DIR="$(need_val --dir "${2-}")"
+        fi
+        shift 2
+        ;;
+      --desc)        DESC="$(need_val --desc "${2-}")"; shift 2;;
+      --gitignore)   GITIGNORE_TEMPLATES="$(need_val --gitignore "${2-}")"; shift 2;;
+      --license)     LICENSE="$(lc "$(need_val --license "${2-}")")"; shift 2;;
+      --lfs)         USE_LFS=1; shift;;
+      --remote)      REMOTE_BASE="$(need_val --remote "${2-}")"; shift 2;;
+      --remote-name) REMOTE_NAME="$(need_val --remote-name "${2-}")"; shift 2;;
+      --github)
+        GITHUB_VISIBILITY="$(lc "$(need_val --github "${2-}")")"
+        case "$GITHUB_VISIBILITY" in
+          private|public) : ;;
+          *) die "--github must be either private or public" ;;
+        esac
+        shift 2
+        ;;
+      --github-remote-name) GITHUB_REMOTE_NAME="$(need_val --github-remote-name "${2-}")"; shift 2;;
+      --github-owner) GITHUB_OWNER="$(need_val --github-owner "${2-}")"; shift 2;;
+      --github-name) GITHUB_REPO_NAME="$(need_val --github-name "${2-}")"; shift 2;;
+      --github-desc)   GITHUB_DESC="$(need_val --github-desc "${2-}")"; shift 2;;
+      --push-all-branches) PUSH_ALL_BRANCHES=1; shift;;
+      --push-tags) PUSH_TAGS=1; shift;;
+      --allow-dirty) ALLOW_DIRTY=1; shift;;
+      --dry-run) DRY_RUN=1; shift;;
+      --no-dev-branch) MAKE_DEV_BRANCH=0; shift;;
+      -h|--help) usage; exit 0;;
+      *) die "unknown option: $1";;
+    esac
+  done
+fi
 
 # Default remote if flag omitted but env is set
-if [[ "$MODE" == "create" && -z "$REMOTE_BASE" && -n "${NPJ_REMOTE_DEFAULT-}" ]]; then
+if [[ ( "$MODE" == "create" || "$MODE" == "list-remote" ) && -z "$REMOTE_BASE" && -n "${NPJ_REMOTE_DEFAULT-}" ]]; then
   REMOTE_BASE="$NPJ_REMOTE_DEFAULT"
+fi
+
+if [[ "$MODE" == "list-remote" ]]; then
+  list_remote_projects
+  exit 0
 fi
 
 # Default GitHub description to README description if not provided explicitly.
@@ -530,13 +596,8 @@ fi
 
 # ---------- optional remote bare repo ----------
 if [[ -n "$REMOTE_BASE" ]]; then
-  # Validate user@host:/abs/path format. Kill with kindness if it doesn't match, since we need a valid format to proceed with creating the remote repo.
-  case "$REMOTE_BASE" in
-    *:/*) : ;; # ok
-    *) die "--remote must be in the form user@host:/absolute/path";;
-  esac
-  REMOTE_HOST="${REMOTE_BASE%%:*}"     # username@host
-  REMOTE_BASE_DIR="${REMOTE_BASE#*:}"  # /srv/nas3/projects
+  # Validate and split user@host:/abs/path before creating the remote repo.
+  parse_remote_base
   REMOTE_REPO_DIR="${REMOTE_BASE_DIR%/}/${NAME}.git"
 
   echo ">> Creating remote bare repo: ${REMOTE_HOST}:${REMOTE_REPO_DIR}"

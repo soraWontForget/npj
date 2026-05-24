@@ -16,6 +16,7 @@ or publish an existing local Git repository to GitHub.
 - Adds a pre-commit hook to block files over 100 MB
 - Optionally creates a `develop` branch
 - Optionally creates a bare SSH remote repo and pushes your branches to it
+- Lists existing `npj` bare SSH remote projects
 - Optionally creates a GitHub repo with `gh` and pushes your branches to it
 - Publishes an existing local Git repo to a new GitHub repo without modifying its files or commits
 - Works on macOS with Bash 3.2+ and modern Linux
@@ -59,6 +60,7 @@ or publish an existing local Git repository to GitHub.
 
 ```bash
 npj <ProjectName> [options]
+npj list-remote [--remote <user@host:/abs/path>]
 npj publish-existing [repo-path] --github <private|public> [options]
 ```
 
@@ -71,7 +73,7 @@ npj publish-existing [repo-path] --github <private|public> [options]
 | `--gitignore <csv>`              | Comma-separated `.gitignore` templates: `c`, `macos`, `python`, `node`.  |
 | `--license <mit\|apache2\|none>` | Choose license. Default: `mit`.                                          |
 | `--lfs`                          | Initialize Git LFS and track common binary types.                        |
-| `--remote <user@host:/abs/path>` | Create a bare SSH remote repo and push to it.                            |
+| `--remote <user@host:/abs/path>` | Create a bare SSH remote repo and push to it. With `list-remote`, inspect this remote base. |
 | `--remote-name <name>`           | Remote name for `--remote`. Default: `origin`.                           |
 | `--github <private\|public>`     | Create a GitHub repo and push to it.                                     |
 | `--github-remote-name <name>`    | Remote name for the GitHub repo. Default: `origin`, or `github` when `--remote` is also used. |
@@ -160,6 +162,18 @@ npj GameArt \
 npj GameArt --desc "Art assets for the game" --gitignore macos --lfs
 ```
 
+**List projects on the configured SSH remote:**
+
+```bash
+npj list-remote --remote username@ipaddress:/path/to/folder
+```
+
+**List projects using `NPJ_REMOTE_DEFAULT`:**
+
+```bash
+npj list-remote
+```
+
 **Skip `develop` branch creation:**
 
 ```bash
@@ -177,7 +191,8 @@ npj MyOneBranchProject --no-dev-branch
 - `publish-existing` refuses to run with uncommitted changes unless `--allow-dirty` is passed.
 - `--github` publishes to the account authenticated with `gh auth login`.
 - If `NPJ_REMOTE_DEFAULT` is set and you also pass `--github`, `npj` creates both remotes unless you unset `NPJ_REMOTE_DEFAULT` for that command.
-- `NPJ_REMOTE_DEFAULT` does not apply to `publish-existing`.
+- `NPJ_REMOTE_DEFAULT` applies to project creation and `list-remote`, but not to `publish-existing`.
+- `list-remote` lists first-level `*.git` directories in the configured remote base and strips the `.git` suffix.
 - If running with `--remote`, ensure you have SSH access to the remote host.
 - The script aborts if the target directory already contains a `.git/` folder.
 
